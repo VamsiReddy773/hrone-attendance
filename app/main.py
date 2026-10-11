@@ -9,23 +9,42 @@ works, but nobody has reviewed it. Read PROBLEM_STATEMENT.docx for what is expec
 openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
 """
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from pymongo import MongoClient
+from pymongo import ASCENDING, MongoClient
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
-load_dotenv()
+load_dotenv()  # does not override real environment variables
 
-client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
-db = client[os.getenv("MONGO_DB", "attendance_db")]
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB = os.getenv("MONGO_DB", "attendance_db")
+
+client = MongoClient(MONGO_URI, tz_aware=True, serverSelectionTimeoutMS=5000)
+db = client[MONGO_DB]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
 
+def ensure_indexes() -> None:
+    # create_index is idempotent: running it again with the same spec does nothing
+    db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="uq_emp_code")
+    db.attendance_logs.create_index(
+        [("emp_code", ASCENDING), ("date", ASCENDING)], unique=True, name="uq_emp_date"
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    ensure_indexes()
+    yield
+
+
+app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -71,6 +90,10 @@ class PunchInIn(BaseModel):
 # --------------------------------------------------------------------------- #
 @app.get("/health")
 def health():
+    try:
+        client.admin.command("ping")
+    except PyMongoError:
+        raise HTTPException(503, "database unavailable")
     return {"status": "ok"}
 
 
